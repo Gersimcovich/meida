@@ -5,8 +5,6 @@ import express, {
 } from "express";
 import { randomUUID } from "node:crypto";
 import { z, ZodError } from "zod";
-import { scanMarket } from "../shared/signals.ts";
-import { demoSnapshot } from "../shared/demo.ts";
 import type {
   AppState,
   JournalEntry,
@@ -17,6 +15,8 @@ import type { Config } from "./config.ts";
 import { Store } from "./store.ts";
 import { ProviderError, SchwabAuth } from "./auth.ts";
 import { OwnerAuth } from "./owner.ts";
+import { ScanCoordinator } from "./scanner.ts";
+import { TelegramNotifications } from "./notifications.ts";
 
 const modeSchema = z.enum(["demo", "schwab"]);
 const symbolSchema = z
@@ -99,10 +99,25 @@ interface Dependencies {
   store: Store;
   auth: SchwabAuth;
   provider: { snapshot(symbols: string[]): Promise<MarketSnapshot> };
+  scanner?: ScanCoordinator;
+  notifications?: TelegramNotifications;
 }
 
-export function createApp({ config, store, auth, provider }: Dependencies) {
+export function createApp({
+  config,
+  store,
+  auth,
+  provider,
+  scanner: suppliedScanner,
+  notifications: suppliedNotifications,
+}: Dependencies) {
   const app = express();
+  const scanner =
+    suppliedScanner ?? new ScanCoordinator({ store, auth, provider });
+  const notifications =
+    suppliedNotifications ??
+    new TelegramNotifications({ config, store, auth, scanner });
+  app.locals.notifications = notifications;
   const owner = new OwnerAuth(config, store);
   app.disable("x-powered-by");
   // Hosted platform health checks may use an internal Host header. Never expose state here.
@@ -112,11 +127,9 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
       req.headers.host?.toLowerCase() !==
       new URL(config.origin).host.toLowerCase()
     )
-      return res
-        .status(403)
-        .json({
-          error: "Unexpected host. Open the configured local app address.",
-        });
+      return res.status(403).json({
+        error: "Unexpected host. Open the configured local app address.",
+      });
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Referrer-Policy", "no-referrer");
@@ -151,12 +164,10 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
   });
   app.use("/api", (req, res, next) => {
     if (!owner.session(req))
-      return res
-        .status(401)
-        .json({
-          error: "Sign in to your private Meida workspace.",
-          code: "OWNER_AUTH_REQUIRED",
-        });
+      return res.status(401).json({
+        error: "Sign in to your private Meida workspace.",
+        code: "OWNER_AUTH_REQUIRED",
+      });
     next();
   });
   app.post("/api/logout", (req, res) => {
@@ -167,8 +178,6 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
     });
     res.json({ authenticated: !owner.required });
   });
-  let configurationRevision = 0;
-
   app.get("/api/state", (_req, res) => {
     const state: AppState = {
       mode: store.mode,
@@ -182,7 +191,7 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
   });
   app.put("/api/watchlist", (req, res) => {
     const { symbols } = watchlistSchema.parse(req.body);
-    configurationRevision++;
+    scanner.invalidate();
     store.set("watchlist", symbols);
     store.delete("lastScan:demo");
     store.delete("lastScan:schwab");
@@ -190,7 +199,7 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
   });
   app.put("/api/rules", (req, res) => {
     const rules = rulesSchema.parse(req.body);
-    configurationRevision++;
+    scanner.invalidate();
     store.set("rules", rules);
     store.delete("lastScan:demo");
     store.delete("lastScan:schwab");
@@ -198,59 +207,64 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
   });
   app.post("/api/mode", (req, res) => {
     const { mode } = z.object({ mode: modeSchema }).strict().parse(req.body);
-    configurationRevision++;
+    scanner.invalidate();
     store.set("mode", mode);
     res.json({ mode });
   });
-  let inFlight = false;
-  let lastLiveAttempt = 0;
   app.post("/api/scan", async (req, res) => {
     const body = z
       .object({ mode: modeSchema.optional() })
       .strict()
       .parse(req.body || {});
     const mode: SourceMode = body.mode || store.mode;
-    if (inFlight) throw new ProviderError("A scan is already running.", 409);
-    if (mode === "schwab" && !auth.status().connected)
-      throw new ProviderError("Connect Schwab before scanning live data.", 401);
-    if (mode === "schwab" && Date.now() - lastLiveAttempt < 30_000) {
-      res.setHeader(
-        "Retry-After",
-        Math.ceil((30_000 - (Date.now() - lastLiveAttempt)) / 1000),
-      );
-      throw new ProviderError("Wait 30 seconds between Schwab scans.", 429);
-    }
-    inFlight = true;
-    const authRevision = auth.revision;
-    const scanRevision = configurationRevision;
-    const watchlist = store.watchlist;
-    const rules = store.rules;
-    if (mode === "schwab") lastLiveAttempt = Date.now();
     try {
-      const snapshot =
-        mode === "demo"
-          ? demoSnapshot(watchlist)
-          : await provider.snapshot(watchlist);
-      if (scanRevision !== configurationRevision)
-        throw new ProviderError(
-          "Scan settings changed while scanning. Run a new scan.",
-          409,
-        );
-      if (
-        mode === "schwab" &&
-        (auth.revision !== authRevision || !auth.status().connected)
-      )
-        throw new ProviderError(
-          "The Schwab connection changed during the scan. Run a new scan.",
-          409,
-        );
-      const result = scanMarket(snapshot, rules);
-      store.saveScan(result);
-      res.json(result);
-    } finally {
-      inFlight = false;
+      res.json(await scanner.run(mode));
+    } catch (error) {
+      if (error instanceof ProviderError && error.status === 429)
+        res.setHeader("Retry-After", "30");
+      throw error;
     }
   });
+  app.get("/api/notifications/telegram", (_req, res) =>
+    res.json(notifications.status()),
+  );
+  app.post("/api/notifications/telegram/configure", async (req, res) => {
+    const { token } = z
+      .object({
+        token: z
+          .string()
+          .trim()
+          .regex(
+            /^\d{5,20}:[A-Za-z0-9_-]{20,120}$/,
+            "Use the bot token supplied by BotFather.",
+          ),
+      })
+      .strict()
+      .parse(req.body);
+    res.json(await notifications.configure(token));
+  });
+  app.post("/api/notifications/telegram/pair", async (_req, res) =>
+    res.json(await notifications.pair()),
+  );
+  app.post("/api/notifications/telegram/confirm", async (_req, res) =>
+    res.json(await notifications.confirm()),
+  );
+  app.put("/api/notifications/telegram", (req, res) => {
+    const preferences = z
+      .object({
+        enabled: z.boolean(),
+        horizon: z.enum(["all", "intraday", "swing"]),
+      })
+      .strict()
+      .parse(req.body);
+    res.json(notifications.setPreferences(preferences));
+  });
+  app.post("/api/notifications/telegram/test", async (_req, res) =>
+    res.json(await notifications.test()),
+  );
+  app.delete("/api/notifications/telegram", (_req, res) =>
+    res.json(notifications.disconnect()),
+  );
   app.get("/api/journal", (_req, res) =>
     res.json({ journal: store.journal() }),
   );
@@ -334,7 +348,7 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
     res.redirect("/?connection=connected");
   });
   app.post("/api/auth/schwab/disconnect", (_req, res) => {
-    configurationRevision++;
+    scanner.invalidate();
     auth.disconnect();
     store.set("mode", "demo");
     store.delete("lastScan:schwab");
@@ -346,16 +360,13 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
   app.use(
     (error: unknown, _req: Request, res: Response, _next: NextFunction) => {
       if (error instanceof ZodError)
-        return res
-          .status(400)
-          .json({
-            error: error.issues
-              .map(
-                (issue) =>
-                  `${issue.path.join(".") || "Input"}: ${issue.message}`,
-              )
-              .join("; "),
-          });
+        return res.status(400).json({
+          error: error.issues
+            .map(
+              (issue) => `${issue.path.join(".") || "Input"}: ${issue.message}`,
+            )
+            .join("; "),
+        });
       if (error instanceof ProviderError)
         return res.status(error.status).json({ error: error.message });
       if (error instanceof SyntaxError && "body" in error)
@@ -363,12 +374,10 @@ export function createApp({ config, store, auth, provider }: Dependencies) {
           .status(400)
           .json({ error: "Request body must be valid JSON." });
       // Provider bodies, authorization headers, and callback query strings are never logged or returned.
-      res
-        .status(500)
-        .json({
-          error:
-            "The request could not be completed. Check server configuration and try again.",
-        });
+      res.status(500).json({
+        error:
+          "The request could not be completed. Check server configuration and try again.",
+      });
     },
   );
   return app;

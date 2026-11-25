@@ -49,6 +49,7 @@ import type {
   Signal,
   SourceMode,
 } from "../shared/types";
+import TelegramAlerts from "./TelegramAlerts";
 
 type View = "overview" | "watchlist" | "rules" | "journal" | "connections";
 const NAV = [
@@ -1885,6 +1886,11 @@ export default function App() {
                   )}
                 </div>
               </section>
+              <TelegramAlerts
+                mode={state.mode}
+                schwabConnected={state.connection.connected}
+                onError={handleError}
+              />
               <div className="connection-side">
                 <section className="panel">
                   <ShieldCheck size={26} className="accent-icon" />

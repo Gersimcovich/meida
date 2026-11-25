@@ -2,6 +2,8 @@
 
 Source: user-supplied text titled **Market Data Production — Schwab Streamer API**, reviewed 2026-11-25. This is a concise summary of relevant protocol facts and engineering implications, not a reproduction of the source document. Streaming is a future integration boundary; these notes do not assert that a live stream is connected.
 
+Current Telegram alert delivery uses background **REST polling**. With Schwab connected and delivery enabled, the running server scans during regular market hours every 60 seconds, including while the browser is closed. A separate worker checks delivery every 20 seconds, sends at most one alert per tick, and only sends still-current Schwab-source signals with observations no more than 120 seconds old. This does not provide tick-by-tick coverage or run while the server is stopped. Pairing and an explicit test send are available in Connections; actual Telegram delivery remains unverified until the owner pairs the chat and confirms a successful test. See [TELEGRAM.md](TELEGRAM.md) for setup and delivery limitations.
+
 ## Access and service selection
 
 The documented transport is JSON over WebSockets. Obtain an OAuth access token from POST Token and connection details from GET User Preference. Use the returned connection information and the associated customer ID, correlation ID, channel, and function ID; do not hardcode values from documentation samples. Community clients use `/trader/v1/userPreference`; confirm any additional Accounts and Trading Production entitlement needed to call it. The current REST market-data MVP does not require streaming or brokerage order access.
@@ -21,13 +23,13 @@ The supplied document states **one simultaneous streamer connection per user**. 
 
 Command semantics:
 
-| Command | Effect |
-| --- | --- |
-| `SUBS` | Replaces all subscribed symbols for that service. |
-| `ADD` | Adds symbols without discarding existing subscriptions. |
-| `UNSUBS` | Removes named symbols. |
-| `VIEW` | Changes the selected fields for all symbols in that service. |
-| `LOGOUT` | Ends the streaming connection. |
+| Command  | Effect                                                       |
+| -------- | ------------------------------------------------------------ |
+| `SUBS`   | Replaces all subscribed symbols for that service.            |
+| `ADD`    | Adds symbols without discarding existing subscriptions.      |
+| `UNSUBS` | Removes named symbols.                                       |
+| `VIEW`   | Changes the selected fields for all symbols in that service. |
+| `LOGOUT` | Ends the streaming connection.                               |
 
 The response-code table includes ordinary success (`0`) and command-specific success codes (`26`–`29`). Authentication denial (`3`) severs the connection; connection-limit (`12`), symbol-limit (`19`), unavailable-service (`11`), malformed-command (`21`), failed-mutation (`22`–`25`), and stopped-stream (`30`) conditions need distinct handling. Do not retry permission or malformed-request failures indefinitely. The source notes that parallel subscription mutations can cause failures.
 
@@ -45,11 +47,11 @@ Conflated last-price updates and cumulative-volume differences are **not** a com
 
 The mappings below summarize the detailed service field tables, not the generic response example. Numeric keys arrive as JSON strings.
 
-| Service | Relevant numeric fields |
-| --- | --- |
+| Service             | Relevant numeric fields                                                                                                                                                                                                                                                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LEVELONE_EQUITIES` | `0` symbol; `1` bid; `2` ask; `3` last; `4`/`5` bid/ask sizes; `8` total volume; `10`/`11` day high/low; `12` previous close; `17` open; `27`/`28` regular quote/trade flags; `29` regular last; `32` security status; `33` mark; `34` quote time; `35` trade time; `36` regular trade time; `37`/`38` bid/ask times; `42` net percent change. |
-| `LEVELONE_OPTIONS` | `0` symbol; `2` bid; `3` ask; `4` last; `8` total volume; `9` OI; `10` IV; `13` multiplier; `16`/`17` bid/ask sizes; `20` strike; `21` type; `22` underlying; `24` deliverables; `27` DTE; `28`–`32` delta/gamma/theta/vega/rho; `33` security status; `35` underlying price; `37` mark; `38` quote time; `39` trade time. |
-| `CHART_EQUITY` | `0` symbol; `1` open; `2` high; `3` low; `4` close; `5` minute volume; `6` sequence; `7` chart time in epoch milliseconds; `8` chart day. |
+| `LEVELONE_OPTIONS`  | `0` symbol; `2` bid; `3` ask; `4` last; `8` total volume; `9` OI; `10` IV; `13` multiplier; `16`/`17` bid/ask sizes; `20` strike; `21` type; `22` underlying; `24` deliverables; `27` DTE; `28`–`32` delta/gamma/theta/vega/rho; `33` security status; `35` underlying price; `37` mark; `38` quote time; `39` trade time.                     |
+| `CHART_EQUITY`      | `0` symbol; `1` open; `2` high; `3` low; `4` close; `5` minute volume; `6` sequence; `7` chart time in epoch milliseconds; `8` chart day.                                                                                                                                                                                                      |
 
 **Documentation discrepancy:** an earlier generic equity response example uses field positions inconsistent with the detailed `LEVELONE_EQUITIES` table. Do not infer numeric mappings from that generic sample. Confirm the detailed table against current official docs and an authorized stream before release. The source also contains ambiguous size descriptions; avoid converting sizes to shares/contracts until the service-specific units have been validated.
 

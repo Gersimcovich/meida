@@ -41,7 +41,7 @@ Open the deployed URL and sign in with the owner password. All data and Schwab a
 
 1. In the [Schwab Developer Portal](https://developer.schwab.com/products/trader-api--individual), create your app with **Market Data Production** access. Wait for its status to be **Ready For Use**. Portal access alone is not app approval.
 2. Register the exact hosted callback shown by Meida's Connections screen, for example `https://your-service.up.railway.app/api/auth/schwab/callback`. If you previously registered the local callback, update the Schwab app to the hosted callback before connecting.
-3. Add your own App Key and App Secret to Railway's private `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` variables. Preserve `TOKEN_ENCRYPTION_KEY` across deployments; changing it makes saved tokens unreadable and requires reconnection.
+3. Add your own App Key and App Secret to Railway's private `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` variables. Preserve `TOKEN_ENCRYPTION_KEY` across deployments; changing it makes saved Schwab and Telegram credentials unreadable and requires reconnection.
 4. Restart/redeploy after variable changes, sign in to Meida, then choose **Connections → Connect Schwab**. Complete authorization directly with Schwab. OAuth uses `scope=readonly` and returns you to Meida.
 5. Choose Schwab as your data source and run a scan. Quotes must be fresh, confirmed real-time, and in a confirmed regular market session to generate live signals. Missing or incomplete feeds are reported; there is no automatic fallback to demo prices.
 
@@ -49,12 +49,23 @@ The official endpoints are `https://api.schwabapi.com/v1/oauth/authorize`, `http
 
 Do not copy the OAuth client ID or callback from the portal's Swagger example: those belong to the portal. If a secret has been shared in chat or a screenshot, rotate it in Schwab before configuring the app. Disconnect removes Meida's locally stored tokens; revoke the app at Schwab separately to revoke the external authorization grant.
 
+## Connect private Telegram alerts
+
+Open **Connections → Telegram alerts** and follow [the Telegram setup guide](TELEGRAM.md). Create a dedicated bot with **@BotFather**, enter its token in Meida's token field, open the generated pairing link, press **Start** in Telegram, and select **I've started the bot** in Meida. The pairing link expires after ten minutes. Use **Send test message** to verify receipt before enabling market alerts.
+
+The existing `TOKEN_ENCRYPTION_KEY` encrypts the bot connection in SQLite. No Telegram-specific environment variable or manually entered chat ID is required. Setup is unavailable without that encryption key, including in local development. Do not put the bot token in chat, Git, or screenshots.
+
+To enable **Send market alerts**, Schwab must be connected and selected as the data source. Choose **Intraday & swing**, **Intraday only**, or **Swing only**. Enabled monitoring runs on the server while the browser is closed; the service must remain running. Pausing Telegram alerts stops that background monitoring. Disconnecting Schwab or selecting Demo also pauses it. Telegram messages contain research signals and never place orders.
+
+The integration is implemented, but actual Telegram acceptance and receipt must be verified with the owner's bot. A successful test checks the Telegram path; it does not verify Schwab data, signal availability, or future notification delivery.
+
 ## Data coverage and persistence
 
 - The watchlist supports 12 stock/ETF symbols. The scanner requests quotes, one-minute history, daily history, bounded option chains, and official market-session intervals. It does not import the thinkorswim Alert Book.
-- Live scans run manually or every 60 seconds when auto-scan is enabled and the dashboard is open. They are serialized and limited to one every 30 seconds. Daily history is cached for 15 minutes. Provider timestamps and partial failures remain visible.
+- Live scans run manually, through dashboard auto-scan every 60 seconds while the page is open, or through server monitoring every 60 seconds when Telegram market alerts are enabled. Background scans require connected/selected Schwab data and confirmed regular market hours. All scan paths share a serialized execution gate with at least 30 seconds between Schwab scan attempts. Daily history is cached for 15 minutes. Provider timestamps and partial failures remain visible.
 - Option requests use `strikeCount=20` for nearby strikes and cover at most 60 calendar days. This is not the entire options market. Adjusted, mini, and unverified-multiplier contracts are excluded. Volume/open-interest measures activity, not opening trades, institutional identity, or trade direction.
-- SQLite persists watchlists, rules, encrypted tokens, latest snapshots per source, deduplicated signal records, hashed owner sessions, and paper trades. Back up the persistent volume and encryption key separately. Run only one service replica against this SQLite database.
+- SQLite persists watchlists, rules, encrypted Schwab/Telegram credentials, Telegram preferences and delivery receipts, latest snapshots per source, deduplicated signal records, hashed owner sessions, and paper trades. Back up the persistent volume and encryption key separately. Run only one service replica against this SQLite database.
+- The Telegram worker runs every 20 seconds and sends at most one qualifying market alert per tick, up to three per minute. Only Schwab-source snapshots/signals no older than 120 seconds qualify. Candidates must remain in the latest applicable scan; there is no stale backlog replay. The first alert for each instrument, rule, direction, market session, and destination is deduplicated, with receipts retained for three days. Rate-limit responses apply a cooldown. An ambiguous send or timeout is not retried automatically, which can mean a missed alert. See [Telegram delivery limits](TELEGRAM.md#delivery-behavior-and-limits).
 - Journal fees are **total round-trip fees**. Closing a trade replaces this total if supplied; it does not add it twice. Include spread, slippage, and fees in paper-price assumptions. Stocks use multiplier 1; options require an explicit multiplier and whole contract quantities. A worthless option can close at zero.
 - Trades retain demo/Schwab source labels. Paper trades never become brokerage orders.
 
@@ -74,7 +85,7 @@ For local Schwab authorization only, create a locally trusted certificate using 
 
 ## Before customer use
 
-Customer access needs tenant isolation, individual user accounts, per-user credentials and data, durable scheduled jobs, retention controls, and operational monitoring. An individual API approval does not automatically confer commercial or market-data redistribution rights. Confirm the applicable Schwab and exchange permissions before offering access to customers.
+Customer access needs tenant isolation, individual user accounts, per-user credentials and data, durable job coordination across instances, retention controls, and operational monitoring. The current Telegram worker is a single-process, single-owner service, not a customer delivery system. An individual API approval does not automatically confer commercial or market-data redistribution rights. Confirm the applicable Schwab and exchange permissions before offering access to customers.
 
 ## Troubleshooting
 
@@ -85,5 +96,6 @@ Customer access needs tenant isolation, individual user accounts, per-user crede
 - **Reconnect required:** authorize again with Schwab. Refresh grants can expire or be revoked; no fixed lifetime is assumed.
 - **No signals:** check source, market session, freshness, baseline history coverage, watchlist, and thresholds. A successful scan can find no candidates.
 - **Data denied:** verify product approval and market-data entitlements. Meida does not fabricate unavailable data.
+- **Telegram unavailable, unpaired, or paused:** follow [Telegram troubleshooting](TELEGRAM.md#troubleshooting). Check the encryption key, pairing expiry, selected data source, Schwab connection, and **Send market alerts** setting.
 
-Live authorization and actual account entitlements still require verification with the configured Schwab app; fixture tests cannot establish them.
+Live authorization and actual account entitlements still require verification with the configured Schwab app; fixture tests cannot establish them. Telegram delivery likewise requires pairing the owner's bot and checking receipt of the explicit test message.

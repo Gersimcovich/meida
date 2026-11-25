@@ -2,7 +2,7 @@
 
 A personal workspace for researching unusual stock and options activity using Schwab market data.
 
-The first version combines explainable intraday and swing signals, configurable alert rules, a watchlist, and a paper-trade journal. It calculates signals from market data; it does not import thinkorswim's native alerts or place orders.
+The first version combines explainable intraday and swing signals, configurable alert rules, a watchlist, a paper-trade journal, and optional private Telegram alerts. It calculates signals from market data; it does not import thinkorswim's native alerts or place orders.
 
 ## Run locally
 
@@ -37,6 +37,14 @@ The owner password protects a single personal workspace. This is not yet a custo
 
 The live adapter uses read-only quote, option-chain, price-history, and market-hours endpoints. Polling is bounded and requests are rate-limited locally. Failed requests, delayed quotes, stale data, and insufficient history are visible rather than replaced with synthetic data. Live access still needs verification with an approved app and actual account entitlements; development tests use controlled API fixtures.
 
+## Receive private Telegram alerts
+
+In **Connections → Telegram alerts**, connect a dedicated bot created through Telegram's **@BotFather**, open Meida's ten-minute pairing link, press **Start** in Telegram, and confirm in Meida. Use **Send test message** to verify your private chat. Enter the bot token only in Meida's token field; no Telegram environment variable or token shared in chat is needed. The saved token is encrypted with the server's existing `TOKEN_ENCRYPTION_KEY`.
+
+Connect Schwab, select the Schwab data source, choose **Intraday & swing**, **Intraday only**, or **Swing only**, then enable **Send market alerts**. With alerts enabled, the running server checks for signals every 60 seconds during confirmed regular market hours, even when the browser is closed. Demo signals are never sent.
+
+Delivery is limited to three market alerts per minute, with persistent deduplication and freshness checks. Uncertain sends are not retried automatically, so an alert can be missed; this is not guaranteed delivery or tick-by-tick monitoring. Follow [the Telegram guide](docs/TELEGRAM.md) for setup, operating limits, and troubleshooting. Actual Telegram delivery remains unverified until you pair the bot and receive a test.
+
 ## Research workflow
 
 1. Choose symbols in **Watchlist**.
@@ -56,6 +64,7 @@ Schwab OAuth + market-data REST
 Express / TypeScript ── SQLite settings, encrypted tokens, paper journal
           │
           ├── normalized snapshots → deterministic signal engine
+          ├── enabled background scans → private Telegram alerts
           │
           ▼
 React dashboard (same origin)
@@ -65,6 +74,6 @@ Code is separated into `server/` (data provider, OAuth, storage, APIs), `shared/
 
 ## Research and next phase
 
-See [the trader playbook](docs/TRADER_PLAYBOOK.md) for indicator meanings, conditional action matrices, execution-cost examples, and primary sources. See [research and sources](docs/RESEARCH.md) for verified capabilities, assumptions, signal definitions, and evaluation methodology. See [streaming notes](docs/STREAMING.md) for the user-supplied Schwab Streamer protocol and the steps required before adding WebSocket ingestion. This version uses REST snapshots, manually or every 60 seconds while auto-scan is enabled and the dashboard is open; it does not identify market-wide option sweeps, import native thinkorswim alerts, provide a news feed, or run a background scan after the app is closed.
+See [the trader playbook](docs/TRADER_PLAYBOOK.md) for indicator meanings, conditional action matrices, execution-cost examples, and primary sources. See [research and sources](docs/RESEARCH.md) for verified capabilities, assumptions, signal definitions, and evaluation methodology. See [streaming notes](docs/STREAMING.md) for the user-supplied Schwab Streamer protocol and the steps required before adding WebSocket ingestion. This version uses REST snapshots: manual scans, dashboard auto-scan while the page is open, and independent server monitoring when Telegram market alerts are enabled. Closing the browser does not stop enabled Telegram monitoring; stopping or suspending the server does. It does not identify market-wide option sweeps, import native thinkorswim alerts, or provide a news feed.
 
 Before customer access, obtain the appropriate commercial API and market-data redistribution permissions, add authenticated users and tenant isolation, deploy managed secret storage, and validate strategies out of sample with realistic trading costs. Personal API approval is not evidence of commercial distribution rights. Alerts are research candidates; profitability has not been established.

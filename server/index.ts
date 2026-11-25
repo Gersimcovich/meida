@@ -47,10 +47,12 @@ if (process.env.NODE_ENV === "production") {
   app.use(vite.middlewares);
   closeVite = () => vite.close();
 }
-server.listen(config.port, config.host, () =>
-  console.log(`Meida is available at ${config.origin}`),
-);
+server.listen(config.port, config.host, () => {
+  console.log(`Meida is available at ${config.origin}`);
+  app.locals.notifications.start();
+});
 async function shutdown() {
+  await app.locals.notifications.stop();
   await closeVite?.();
   server.close(() => {
     store.close();
