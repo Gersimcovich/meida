@@ -72,6 +72,13 @@ export const DEFAULT_RULES: Rules = {
     "option-activity",
   ],
 };
+export interface SignalPlan {
+  action: "watch" | "review-long" | "review-short" | "review-activity";
+  headline: string;
+  trigger: string;
+  invalidation: string;
+  steps: string[];
+}
 export interface Signal {
   id: string;
   symbol: string;
@@ -90,6 +97,7 @@ export interface Signal {
   evidence: { label: string; value: string }[];
   cautions: string[];
   invalidation: string;
+  plan: SignalPlan;
   chart: { time: number; price: number; volume: number }[];
 }
 export interface ScanResult {

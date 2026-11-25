@@ -3335,6 +3335,138 @@ input:focus-visible + .toggle-track {
   margin-top: 3px;
   overflow-wrap: anywhere;
 }
+
+.trader-read {
+  --plan-accent: #76569b;
+  --plan-border: #e5dbef;
+  --plan-background: #f8f5fc;
+  margin-top: 22px;
+  padding: 16px;
+  background: var(--plan-background);
+  border: 1px solid var(--plan-border);
+  border-radius: 8px;
+}
+.trader-read.review-long {
+  --plan-accent: #39745f;
+  --plan-border: #dceae3;
+  --plan-background: #f5faf7;
+}
+.trader-read.review-short {
+  --plan-accent: #a35b66;
+  --plan-border: #f0dfe3;
+  --plan-background: #fdf7f8;
+}
+.trader-read.review-activity {
+  --plan-accent: #876431;
+  --plan-border: #ece3d2;
+  --plan-background: #fcfaf5;
+}
+.trader-read-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.trader-read-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #655e72;
+  font:
+    600 13px "DM Sans",
+    sans-serif;
+}
+.trader-read-heading h3 svg {
+  color: var(--plan-accent);
+}
+.trader-read-heading > span {
+  font-size: 9px;
+  letter-spacing: 0.6px;
+  color: #786b83;
+}
+.trader-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 17px;
+  color: var(--plan-accent);
+}
+.trader-action strong {
+  font-size: 14px;
+  font-weight: 650;
+}
+.trader-headline {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #655d70;
+  margin-top: 8px;
+}
+.trader-conditions {
+  margin: 16px 0 0;
+}
+.trader-conditions > div {
+  border-top: 1px solid var(--plan-border);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+.trader-conditions dt {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--plan-accent);
+}
+.trader-conditions dd {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #6b6575;
+  margin: 5px 0 0;
+}
+.trader-next-steps {
+  border-top: 1px solid var(--plan-border);
+  margin-top: 15px;
+  padding-top: 12px;
+}
+.trader-next-steps summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--plan-accent);
+}
+.trader-next-steps summary::-webkit-details-marker {
+  display: none;
+}
+.trader-next-steps summary > span {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  font-size: 11px;
+  color: #796b86;
+  font-weight: 400;
+}
+.trader-next-steps[open] summary svg {
+  transform: rotate(180deg);
+}
+.trader-next-steps ol {
+  margin: 13px 0 0;
+  padding-left: 19px;
+  color: #706778;
+  font-size: 14px;
+  line-height: 1.75;
+}
+.trader-next-steps li + li {
+  margin-top: 10px;
+}
+@media (max-width: 1050px) {
+  .trader-read {
+    grid-column: 1 / -1;
+    grid-row: 5;
+    margin-top: 18px;
+  }
+}
 .journal-actions {
   display: flex;
   gap: 9px;

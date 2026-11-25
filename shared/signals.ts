@@ -48,6 +48,59 @@ const strength = (ratio: number, confirmation = 0) =>
     Math.round(45 + Math.log2(Math.max(1, ratio)) * 16 + confirmation),
   );
 
+const reviewSteps = [
+  "Recheck a current two-sided quote and the spread; skip an entry if execution costs undermine the setup.",
+  "Check earnings, news and scheduled events before entry; this feed does not establish that no catalyst is pending.",
+  "Choose a maximum dollar loss before entering and size the position using the planned entry and invalidation. Allow for fees, slippage and gaps.",
+  "Record the entry and exit conditions in the paper journal first. A stop order can fill beyond its trigger price.",
+];
+
+/** Conditional next steps reference measured levels; they are not executable orders. */
+function directionalGuidance(
+  kind: "opening-range" | "vwap" | "swing",
+  bullish: boolean,
+  level: number,
+  relativeVolume: number,
+): Pick<Signal, "plan" | "invalidation"> {
+  const side = bullish ? "long" : "short";
+  const holds = bullish ? "above" : "below";
+  const reverses = bullish ? "below" : "above";
+  const invalidation =
+    kind === "swing"
+      ? `A daily close back ${reverses} ${dollars(level)} fails the breakout.`
+      : kind === "vwap"
+        ? `A confirmed close ${reverses} the evolving session VWAP reverses the cross.`
+        : `A close back ${reverses} ${dollars(level)} returns price inside the range.`;
+  const trigger =
+    kind === "swing"
+      ? `Consider a ${side} only if the session closes ${holds} ${dollars(level)}, the prior 20-session ${bullish ? "high" : "low"}, and a later entry has a current, liquid quote. Daily-close confirmation is pending.`
+      : kind === "vwap"
+        ? `Consider a ${side} only if a new completed one-minute candle holds ${holds} the updated session VWAP (currently ${dollars(level)}), relative volume remains at least ${relativeVolume.toFixed(1)}×, and the entry quote is current and liquid.`
+        : `Consider a ${side} only if a new completed one-minute candle holds ${holds} ${dollars(level)}, the 15-minute opening-range ${bullish ? "high" : "low"}, relative volume remains at least ${relativeVolume.toFixed(1)}×, and the entry quote is current and liquid.`;
+  return {
+    invalidation,
+    plan: {
+      action: bullish ? "review-long" : "review-short",
+      headline: `A ${side} setup to review after confirmation`,
+      trigger,
+      invalidation,
+      steps: [
+        ...(kind === "vwap"
+          ? [
+              "Recompute the session VWAP before deciding; its value moves as new candles complete.",
+            ]
+          : []),
+        ...(!bullish
+          ? [
+              "Confirm borrow availability, borrowing costs and account permissions before considering a short. None are verified by this signal.",
+            ]
+          : []),
+        ...reviewSteps,
+      ],
+    },
+  };
+}
+
 function validBar(bar: Bar) {
   return (
     finite(bar.timestamp) &&
@@ -225,13 +278,11 @@ export function scanMarket(snapshot: MarketSnapshot, rules: Rules): ScanResult {
     const previous = current.at(-2);
     const recentBars =
       last && snapshot.asOf - (last.timestamp + MINUTE) <= MAX_AGE;
-    const chart = current
-      .slice(-70)
-      .map((bar) => ({
-        time: bar.timestamp,
-        price: bar.close,
-        volume: bar.volume,
-      }));
+    const chart = current.slice(-70).map((bar) => ({
+      time: bar.timestamp,
+      price: bar.close,
+      volume: bar.volume,
+    }));
     const base = (
       rule: string,
       instrument = quote.symbol,
@@ -292,6 +343,17 @@ export function scanMarket(snapshot: MarketSnapshot, rules: Rules): ScanResult {
             "Elevated volume alone does not establish trade direction or predict returns.",
           ],
           invalidation: `Participation fades if same-time relative volume falls below ${rules.relativeVolume.toFixed(1)}×.`,
+          plan: {
+            action: "watch",
+            headline: "Wait for price to establish a direction",
+            trigger:
+              "Consider a trade only if a separate, completed price breakout or VWAP cross confirms a direction and the entry quote is current and liquid. Unusual volume alone is not a buy or sell call.",
+            invalidation: `Participation fades if same-time relative volume falls below ${rules.relativeVolume.toFixed(1)}×.`,
+            steps: [
+              "Watch for a price-confirmation signal and its measured invalidation level before choosing long or short.",
+              ...reviewSteps,
+            ],
+          },
         });
       const opening = current.filter(
         (bar) => sessionTime(bar.timestamp).minute < OPEN_MINUTE + 15,
@@ -330,7 +392,12 @@ export function scanMarket(snapshot: MarketSnapshot, rules: Rules): ScanResult {
               volumeCaution,
               "Opening-range breaks can fail. The reference range excludes all later candles.",
             ],
-            invalidation: `A close back ${bullish ? "below" : "above"} ${dollars(bullish ? high : low)} returns price inside the range.`,
+            ...directionalGuidance(
+              "opening-range",
+              bullish,
+              bullish ? high : low,
+              rules.relativeVolume,
+            ),
           });
       }
       if (
@@ -368,7 +435,7 @@ export function scanMarket(snapshot: MarketSnapshot, rules: Rules): ScanResult {
               "VWAP uses typical candle price × volume; it is an approximation, not trade-level VWAP.",
               volumeCaution,
             ],
-            invalidation: `A confirmed close ${bullish ? "below" : "above"} the evolving session VWAP reverses the cross.`,
+            ...directionalGuidance("vwap", bullish, vwap, rules.relativeVolume),
           });
       }
       if (rules.enabled.includes("swing-breakout") && last) {
@@ -408,7 +475,12 @@ export function scanMarket(snapshot: MarketSnapshot, rules: Rules): ScanResult {
                 "This is an intraday alert at a swing level; the current session is excluded from the reference and its daily close is not yet confirmed.",
                 volumeCaution,
               ],
-              invalidation: `A daily close back ${bullish ? "below" : "above"} ${dollars(bullish ? high : low)} fails the breakout.`,
+              ...directionalGuidance(
+                "swing",
+                bullish,
+                bullish ? high : low,
+                rules.relativeVolume,
+              ),
             });
         }
       }
@@ -464,6 +536,19 @@ export function scanMarket(snapshot: MarketSnapshot, rules: Rules): ScanResult {
             "Open interest is a prior-clearing snapshot. Adjusted contracts can have nonstandard deliverables; confirm the contract multiplier before paper entry.",
           ],
           invalidation: `Reassess if the quoted spread exceeds ${rules.maxSpreadPercent}% or a current two-sided quote is unavailable.`,
+          plan: {
+            action: "review-activity",
+            headline: "Investigate activity before choosing a trade",
+            trigger:
+              "Consider an options trade only if independent underlying-price confirmation, a defined-risk structure and a current, liquid option quote support it. Volume/open interest supplies no buy or sell direction.",
+            invalidation: `Reassess if the quoted spread exceeds ${rules.maxSpreadPercent}% or a current two-sided quote is unavailable.`,
+            steps: [
+              `Inspect the ${dollars(option.strike)} ${option.type.toLowerCase()} with ${metrics.dte} calendar days to expiration. Session volume may include closing trades or legs of a spread.`,
+              "Compare implied volatility, time decay and the underlying's price setup; a call is not proof of bullish buying and a put is not proof of bearish buying.",
+              "Define the position's maximum loss and confirm its deliverable and multiplier before choosing quantity. The displayed midpoint is not a promised fill.",
+              ...reviewSteps,
+            ],
+          },
         });
       }
   }

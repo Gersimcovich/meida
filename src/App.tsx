@@ -211,6 +211,67 @@ function Modal({
   );
 }
 
+function TraderRead({ signal }: { signal: Signal }) {
+  const plan = signal.plan;
+  if (!plan) return null;
+  const actionLabels = {
+    watch: "Watch for confirmation",
+    "review-long": "Review long setup",
+    "review-short": "Review short setup",
+    "review-activity": "Review options activity",
+  };
+  const ActionIcon =
+    plan.action === "review-long"
+      ? ArrowUpRight
+      : plan.action === "review-short"
+        ? ArrowDownRight
+        : plan.action === "review-activity"
+          ? Layers3
+          : Eye;
+  return (
+    <section className={`trader-read ${plan.action}`} aria-label="Trader read">
+      <div className="trader-read-heading">
+        <h3>
+          <Crosshair size={16} />
+          Trader read
+        </h3>
+        <span>CONDITIONAL PLAN</span>
+      </div>
+      <div className="trader-action">
+        <ActionIcon size={18} />
+        <strong>{actionLabels[plan.action]}</strong>
+      </div>
+      <p className="trader-headline">{plan.headline}</p>
+      <dl className="trader-conditions">
+        <div>
+          <dt>Confirmation to look for</dt>
+          <dd>{plan.trigger}</dd>
+        </div>
+        <div>
+          <dt>Reassess or stand aside</dt>
+          <dd>{plan.invalidation}</dd>
+        </div>
+      </dl>
+      {plan.steps.length > 0 && (
+        <details className="trader-next-steps">
+          <summary>
+            Next steps{" "}
+            <span>
+              {plan.steps.length} checks
+              <ChevronDown size={14} />
+            </span>
+          </summary>
+          <ol>
+            {plan.steps.map((step, index) => (
+              <li key={index}>{step}</li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </section>
+  );
+}
+
 function PriceChart({ signal }: { signal: Signal }) {
   const data = signal.chart.filter((d) => Number.isFinite(d.price));
   if (data.length < 2)
@@ -828,7 +889,7 @@ export default function App() {
               <h1>{titles[view]}</h1>
               <p>
                 {view === "overview"
-                  ? "Unusual activity. Clear context. A more informed next move."
+                  ? "Unusual activity, explained. Clear conditions for your next step."
                   : view === "watchlist"
                     ? "A focused universe of stocks and ETFs worth watching."
                     : view === "rules"
@@ -1219,6 +1280,9 @@ export default function App() {
                           {pct(chosen.changePercent)} <small>underlying</small>
                         </span>
                       </div>
+                      {chosen.plan && (
+                        <TraderRead key={chosen.id} signal={chosen} />
+                      )}
                       <PriceChart signal={chosen} />
                       <div className="detail-reason">
                         <h3>
@@ -1235,13 +1299,15 @@ export default function App() {
                           </div>
                         ))}
                       </dl>
-                      <div className="invalidation">
-                        <Crosshair size={15} />
-                        <div>
-                          <strong>Reassess the idea when</strong>
-                          <p>{chosen.invalidation}</p>
+                      {!chosen.plan && (
+                        <div className="invalidation">
+                          <Crosshair size={15} />
+                          <div>
+                            <strong>Reassess the idea when</strong>
+                            <p>{chosen.invalidation}</p>
+                          </div>
                         </div>
-                      </div>
+                      )}
                       {chosen.cautions.length > 0 && (
                         <details className="cautions">
                           <summary>
@@ -1874,7 +1940,7 @@ export default function App() {
           <footer className="page-footer">
             <span>
               <Waves size={14} />
-              Turn market activity into context.
+              Turn market activity into next steps.
             </span>
             <span>Research signals · No guaranteed outcomes</span>
           </footer>

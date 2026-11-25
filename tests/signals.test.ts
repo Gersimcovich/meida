@@ -237,3 +237,100 @@ test("rules can be disabled and alert identities are stable and unique", () => {
   assert.equal(new Set(after).size, after.length);
   assert.deepEqual(after, before);
 });
+
+test("every signal has conditional next steps with the same invalidation as its evidence", () => {
+  const signals = run(demoSnapshot(DEMO_SYMBOLS)).signals;
+  for (const signal of signals) {
+    assert.ok(signal.plan.headline);
+    assert.ok(signal.plan.trigger.includes("only if"));
+    assert.equal(signal.plan.invalidation, signal.invalidation);
+    assert.ok(
+      signal.plan.steps.some((step) => step.includes("maximum dollar loss")),
+    );
+    assert.ok(
+      signal.plan.steps.some((step) => step.includes("Check earnings")),
+    );
+    assert.ok(
+      signal.plan.steps.some((step) =>
+        step.includes("stop order can fill beyond"),
+      ),
+    );
+    if (signal.direction === "bullish")
+      assert.equal(signal.plan.action, "review-long");
+    if (signal.direction === "bearish") {
+      assert.equal(signal.plan.action, "review-short");
+      assert.ok(
+        signal.plan.steps.some((step) => step.includes("borrow availability")),
+      );
+    }
+  }
+});
+
+test("unusual volume and call/put activity do not become directional trade calls", () => {
+  const snapshot = fresh();
+  const volume = run(snapshot, "relative-volume").signals;
+  assert.ok(volume.every((signal) => signal.plan.action === "watch"));
+  assert.ok(
+    volume.every((signal) =>
+      signal.plan.trigger.includes("separate, completed price breakout"),
+    ),
+  );
+  for (const type of ["CALL", "PUT"] as const) {
+    snapshot.symbols[0].options[0].type = type;
+    const signal = run(snapshot, "option-activity").signals.find(
+      (candidate) => candidate.symbol === "NVDA",
+    )!;
+    assert.equal(signal.plan.action, "review-activity");
+    assert.equal(signal.direction, "neutral");
+    assert.ok(signal.plan.trigger.includes("no buy or sell direction"));
+  }
+});
+
+test("opening-range guidance uses the measured level rather than a fixed entry target", () => {
+  const snapshot = demoSnapshot(["NVDA"]);
+  const open = Date.parse("2026-11-24T14:30:00Z");
+  for (const bar of snapshot.symbols[0].minuteBars) {
+    if (bar.timestamp >= open && bar.timestamp < open + 15 * 60_000)
+      bar.high = 185.33;
+  }
+  const signal = run(snapshot, "opening-breakout").signals[0];
+  assert.equal(signal.plan.action, "review-long");
+  assert.ok(
+    signal.plan.trigger.includes(
+      "new completed one-minute candle holds above $185.33",
+    ),
+  );
+  assert.ok(signal.plan.invalidation.includes("below $185.33"));
+  assert.ok(signal.plan.trigger.includes("entry quote is current and liquid"));
+});
+
+test("VWAP guidance uses the computed value and asks for an updated reference", () => {
+  const signal = run(demoSnapshot(["AMD"]), "vwap-cross").signals[0];
+  const measured = signal.evidence.find(
+    (item) => item.label === "Approximate VWAP",
+  )!.value;
+  assert.equal(signal.plan.action, "review-long");
+  assert.ok(signal.plan.trigger.includes(`currently ${measured}`));
+  assert.ok(
+    signal.plan.steps.some((step) =>
+      step.includes("Recompute the session VWAP"),
+    ),
+  );
+});
+
+test("swing short guidance waits for the daily close and uses the prior-session low", () => {
+  const snapshot = demoSnapshot(["TSLA"]);
+  for (const bar of snapshot.symbols[0].dailyBars) bar.low = 348.5;
+  const signal = run(snapshot, "swing-breakout").signals[0];
+  assert.equal(signal.plan.action, "review-short");
+  assert.ok(signal.plan.trigger.includes("session closes below $348.50"));
+  assert.ok(
+    signal.plan.trigger.includes("Daily-close confirmation is pending"),
+  );
+  assert.ok(signal.plan.invalidation.includes("above $348.50"));
+  assert.ok(
+    signal.plan.steps.some((step) =>
+      step.includes("None are verified by this signal"),
+    ),
+  );
+});

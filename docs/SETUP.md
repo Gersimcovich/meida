@@ -4,7 +4,19 @@ Meida is a single-owner research app for stocks and standard options. It runs on
 
 ## Railway hosting
 
-Deploy the repository's Dockerfile as one Railway service with **one replica** and a persistent volume mounted at `/data`. Use these runtime variables in Railway's private variable editor:
+Deploy the repository's Dockerfile as one Railway service with **one replica** and a persistent volume mounted at `/data`. Keep these settings on the Railway service itself:
+
+| Setting              | Value                             |
+| -------------------- | --------------------------------- |
+| Dockerfile path      | `Dockerfile`                      |
+| Health-check path    | `/api/health`                     |
+| Health-check timeout | 120 seconds                       |
+| Restart policy       | On failure, at most 3 retries     |
+| Replicas             | 1 in the existing volume's region |
+
+Railway automatically detects the root Dockerfile. These settings do not require a repository Config as Code file. Legacy `railway.json`/`railway.toml` support ends on December 1, 2026; persist and verify the service settings before removing any legacy file. Do not alter the existing volume, domain, or secret variables during that migration. See [Railway's migration guide](https://docs.railway.com/infrastructure-as-code#migrating-from-config-as-code).
+
+Use these runtime variables in Railway's private variable editor:
 
 ```dotenv
 HOST=0.0.0.0
