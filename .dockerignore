@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+dist
+.env
+.env.*
+data
+*.sqlite*
+*.pem
+*.key
+*.crt
+coverage
+attachments
