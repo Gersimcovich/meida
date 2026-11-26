@@ -4437,3 +4437,78 @@ input:focus-visible + .toggle-track {
     font-size: 15px;
   }
 }
+
+.authorization-status {
+  margin-top: 18px;
+  padding: 15px;
+  border: 1px solid #e4dced;
+  border-radius: 7px;
+  background: #faf8fc;
+  color: #74627e;
+}
+.authorization-status-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.authorization-status-heading svg {
+  flex-shrink: 0;
+}
+.authorization-status-heading strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.authorization-status p {
+  color: #746b7d;
+  font-size: 13px;
+  line-height: 1.8;
+  margin-top: 8px;
+}
+.authorization-status p + p {
+  margin-top: 5px;
+}
+.authorization-updated {
+  display: block;
+  color: #7e7189;
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 12px;
+}
+.authorization-status.connected {
+  border-color: #dce9e0;
+  background: #f5faf7;
+  color: #4f785e;
+}
+.authorization-status.failed {
+  border-color: #ebdce2;
+  background: #fdf8fa;
+  color: #9b6077;
+}
+.authorization-status.awaiting_return {
+  border-color: #ebe3d7;
+  background: #fcfaf5;
+  color: #886d43;
+}
+.authorization-refresh-error {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #977349;
+  margin-top: 12px;
+}
+.authorization-instructions {
+  margin-top: 17px;
+}
+.authorization-instructions p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #776b83;
+}
+.authorization-instructions p:first-child svg {
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+.authorization-instructions p + p {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #7e6b87;
+}

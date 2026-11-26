@@ -163,11 +163,20 @@ export function createApp({
     res.json({ authenticated: true });
   });
   app.use("/api", (req, res, next) => {
-    if (!owner.session(req))
+    if (!owner.session(req)) {
+      if (
+        req.method === "GET" &&
+        req.path === "/auth/schwab/callback" &&
+        (req.headers["sec-fetch-mode"] === "navigate" ||
+          req.headers.accept?.includes("text/html"))
+      ) {
+        return res.redirect(303, "/?connection=failed&reason=owner_session");
+      }
       return res.status(401).json({
         error: "Sign in to your private Meida workspace.",
         code: "OWNER_AUTH_REQUIRED",
       });
+    }
     next();
   });
   app.post("/api/logout", (req, res) => {
@@ -328,12 +337,17 @@ export function createApp({
     res.redirect(result.url);
   });
   app.get("/api/auth/schwab/callback", async (req, res) => {
-    const { code, state } = z
+    const parsed = z
       .object({
-        code: z.string().min(1).max(4096),
+        code: z.string().min(1).max(4096).optional(),
+        error: z.string().min(1).max(256).optional(),
         state: z.string().regex(/^[a-f0-9]{64}$/),
       })
-      .parse(req.query);
+      .refine((value) => Boolean(value.code) !== Boolean(value.error))
+      .safeParse(req.query);
+    if (!parsed.success)
+      return res.redirect(303, "/?connection=failed&reason=invalid_return");
+    const { code, state, error } = parsed.data;
     const cookieState =
       (req.headers.cookie || "")
         .split(";")
@@ -344,8 +358,29 @@ export function createApp({
       ...cookieSettings,
       maxAge: undefined,
     });
-    await auth.callback(code, state, cookieState);
-    res.redirect("/?connection=connected");
+    try {
+      if (error) {
+        auth.deny(
+          state,
+          cookieState,
+          error === "access_denied" ? "denied" : "provider_error",
+        );
+        return res.redirect(
+          303,
+          `/?connection=failed&reason=${error === "access_denied" ? "declined" : "authorization_failed"}`,
+        );
+      }
+      await auth.callback(code!, state, cookieState);
+      scanner.invalidate();
+      store.set("mode", "schwab");
+      res.redirect(303, "/?connection=connected");
+    } catch (failure) {
+      const reason =
+        failure instanceof ProviderError && failure.status === 400
+          ? "invalid_return"
+          : "authorization_failed";
+      res.redirect(303, `/?connection=failed&reason=${reason}`);
+    }
   });
   app.post("/api/auth/schwab/disconnect", (_req, res) => {
     scanner.invalidate();

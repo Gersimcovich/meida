@@ -1,12 +1,13 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHash,
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store } from "./store.ts";
-import type { ConnectionStatus } from "../shared/types.ts";
+import type { AuthorizationStatus, ConnectionStatus } from "../shared/types.ts";
 
 interface TokenSet {
   accessToken: string;
@@ -17,6 +18,22 @@ type Fetcher = typeof fetch;
 const AUTH_URL = "https://api.schwabapi.com/v1/oauth/authorize";
 const TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token";
 const MARKET_URL = "https://api.schwabapi.com/marketdata/v1";
+const ATTEMPT_TTL = 10 * 60_000;
+const ATTEMPT_INDEX = "schwabOAuthAttempts";
+const ATTEMPT_PREFIX = "schwabOAuthAttempt:";
+const AUTHORIZATION_STATUS = "schwabAuthorizationStatus";
+const GENERATION_KEY = "schwabAuthorizationGeneration";
+interface OAuthAttempt {
+  createdAt: number;
+  expiresAt: number;
+  fingerprint: string;
+}
+interface SavedAuthorizationStatus extends AuthorizationStatus {
+  fingerprint: string;
+  attemptHash?: string;
+}
+const digest = (value: string) =>
+  createHash("sha256").update(value).digest("hex");
 
 export class ProviderError extends Error {
   constructor(
@@ -59,13 +76,22 @@ export function equalSecret(a: string, b: string): boolean {
 export class SchwabAuth {
   private refreshPromise: Promise<TokenSet> | null = null;
   private reconnect = false;
-  private pending = new Map<string, number>();
-  private generation = 0;
   constructor(
     private config: Config,
     private store: Store,
     private fetcher: Fetcher = fetch,
-  ) {}
+    private now: () => number = Date.now,
+  ) {
+    this.pendingAttempts();
+    const saved = this.savedAuthorization();
+    if (saved?.status === "exchanging")
+      this.setAuthorization(
+        "failed",
+        "The authorization exchange was interrupted. Start the connection again.",
+        saved.startedAt,
+        saved.attemptHash,
+      );
+  }
   get configured() {
     return !!(
       this.config.clientId &&
@@ -74,7 +100,134 @@ export class SchwabAuth {
     );
   }
   get revision() {
-    return this.generation;
+    return this.store.get<number>(GENERATION_KEY, 0);
+  }
+  private advanceGeneration() {
+    // Persist the epoch so an older process cannot revive credentials after disconnect.
+    this.store.set(GENERATION_KEY, randomBytes(6).readUIntBE(0, 6));
+  }
+  private get fingerprint() {
+    return digest(
+      JSON.stringify([this.config.clientId, this.config.redirectUri]),
+    );
+  }
+  private pendingAttempts(): Record<string, OAuthAttempt> {
+    const saved = this.store.get<Record<string, OAuthAttempt>>(
+      ATTEMPT_INDEX,
+      {},
+    );
+    const pending: Record<string, OAuthAttempt> = {};
+    const now = this.now();
+    for (const [hash, attempt] of Object.entries(saved)) {
+      if (
+        /^[a-f0-9]{64}$/.test(hash) &&
+        attempt &&
+        attempt.fingerprint === this.fingerprint &&
+        Number.isFinite(attempt.createdAt) &&
+        attempt.createdAt <= now &&
+        Number.isFinite(attempt.expiresAt) &&
+        attempt.expiresAt > now &&
+        attempt.expiresAt <= attempt.createdAt + ATTEMPT_TTL
+      )
+        pending[hash] = attempt;
+      else this.store.delete(`${ATTEMPT_PREFIX}${hash}`);
+    }
+    if (Object.keys(saved).length !== Object.keys(pending).length)
+      this.store.set(ATTEMPT_INDEX, pending);
+    return pending;
+  }
+  private clearAttempts() {
+    const pending = this.store.get<Record<string, OAuthAttempt>>(
+      ATTEMPT_INDEX,
+      {},
+    );
+    for (const hash of Object.keys(pending))
+      this.store.delete(`${ATTEMPT_PREFIX}${hash}`);
+    this.store.delete(ATTEMPT_INDEX);
+  }
+  private savedAuthorization(): SavedAuthorizationStatus | null {
+    const saved = this.store.get<SavedAuthorizationStatus | null>(
+      AUTHORIZATION_STATUS,
+      null,
+    );
+    return saved?.fingerprint === this.fingerprint ? saved : null;
+  }
+  private setAuthorization(
+    status: AuthorizationStatus["status"],
+    message: string,
+    startedAt?: number,
+    attemptHash?: string,
+  ) {
+    const diagnostic: SavedAuthorizationStatus = {
+      status,
+      message,
+      updatedAt: this.now(),
+      fingerprint: this.fingerprint,
+      ...(startedAt === undefined ? {} : { startedAt }),
+      ...(attemptHash ? { attemptHash } : {}),
+    };
+    this.store.set(AUTHORIZATION_STATUS, diagnostic);
+  }
+  private authorizationStatus(hasTokens: boolean): AuthorizationStatus {
+    const pending = this.pendingAttempts();
+    let saved = this.savedAuthorization();
+    if (
+      saved?.status === "awaiting_return" &&
+      (!saved.attemptHash || !pending[saved.attemptHash])
+    ) {
+      this.setAuthorization(
+        "failed",
+        "The authorization attempt expired. Start the connection again.",
+        saved.startedAt,
+        saved.attemptHash,
+      );
+      saved = this.savedAuthorization();
+    }
+    if (!saved)
+      return {
+        status: hasTokens && !this.reconnect ? "connected" : "idle",
+        updatedAt: 0,
+        message:
+          hasTokens && !this.reconnect
+            ? "Schwab authorization is available."
+            : "No authorization attempt has been started.",
+      };
+    const {
+      fingerprint: _fingerprint,
+      attemptHash: _attemptHash,
+      ...publicStatus
+    } = saved;
+    return publicStatus;
+  }
+  private consumeAttempt(
+    state: string,
+    cookieState: string,
+  ): { hash: string; attempt: OAuthAttempt } {
+    const invalid = () =>
+      new ProviderError(
+        "Authorization state is invalid or expired. Start the connection again.",
+        400,
+      );
+    if (
+      !/^[a-f0-9]{64}$/.test(state) ||
+      !cookieState ||
+      !equalSecret(state, cookieState)
+    )
+      throw invalid();
+    const hash = digest(state);
+    const pending = this.pendingAttempts();
+    if (!pending[hash]) throw invalid();
+    // DELETE ... RETURNING consumes this state once, including across process restarts.
+    const attempt = this.store.take<OAuthAttempt>(`${ATTEMPT_PREFIX}${hash}`);
+    delete pending[hash];
+    this.store.set(ATTEMPT_INDEX, pending);
+    if (
+      !attempt ||
+      attempt.fingerprint !== this.fingerprint ||
+      attempt.expiresAt <= this.now()
+    )
+      throw invalid();
+    return { hash, attempt };
   }
   private readTokens(): TokenSet | null {
     const encrypted = this.store.get<string | null>("schwabTokens", null);
@@ -94,6 +247,7 @@ export class SchwabAuth {
       connected: !!tokens && !this.reconnect,
       reconnectRequired: this.reconnect,
       callbackUrl: this.config.redirectUri,
+      authorization: this.authorizationStatus(!!tokens),
       message: !configured
         ? "Configure Schwab credentials and the encryption key on this server."
         : this.reconnect
@@ -109,11 +263,31 @@ export class SchwabAuth {
         "Schwab credentials and encryption key are not configured.",
         409,
       );
-    for (const [state, expiry] of this.pending)
-      if (expiry < Date.now()) this.pending.delete(state);
-    if (this.pending.size > 100) this.pending.clear();
+    const pending = this.pendingAttempts();
+    const oldest = Object.entries(pending).sort(
+      (a, b) => a[1].createdAt - b[1].createdAt,
+    );
+    for (const [hash] of oldest.slice(0, Math.max(0, oldest.length - 99))) {
+      delete pending[hash];
+      this.store.delete(`${ATTEMPT_PREFIX}${hash}`);
+    }
     const state = randomBytes(32).toString("hex");
-    this.pending.set(state, Date.now() + 10 * 60_000);
+    const hash = digest(state);
+    const createdAt = this.now();
+    const attempt = {
+      createdAt,
+      expiresAt: createdAt + ATTEMPT_TTL,
+      fingerprint: this.fingerprint,
+    };
+    pending[hash] = attempt;
+    this.store.set(`${ATTEMPT_PREFIX}${hash}`, attempt);
+    this.store.set(ATTEMPT_INDEX, pending);
+    this.setAuthorization(
+      "awaiting_return",
+      "Waiting for Schwab sign-in and consent to return to Meida.",
+      createdAt,
+      hash,
+    );
     const url = new URL(AUTH_URL);
     url.search = new URLSearchParams({
       client_id: this.config.clientId,
@@ -125,43 +299,75 @@ export class SchwabAuth {
     return { state, url: url.toString() };
   }
   async callback(code: string, state: string, cookieState: string) {
-    const expiry = this.pending.get(state);
-    if (
-      !state ||
-      !cookieState ||
-      !equalSecret(state, cookieState) ||
-      !expiry ||
-      expiry < Date.now()
-    ) {
-      throw new ProviderError(
-        "Authorization state is invalid or expired. Start the connection again.",
-        400,
-      );
-    }
-    this.pending.delete(state);
-    const generation = this.generation;
-    const tokens = await this.exchange(
-      new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: this.config.redirectUri,
-      }),
+    const { hash, attempt } = this.consumeAttempt(state, cookieState);
+    const generation = this.revision;
+    this.setAuthorization(
+      "exchanging",
+      "Schwab returned to Meida. Completing authorization.",
+      attempt.createdAt,
+      hash,
     );
-    if (generation !== this.generation)
-      throw new ProviderError(
-        "This connection attempt was canceled. Start again.",
-        409,
+    try {
+      const tokens = await this.exchange(
+        new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: this.config.redirectUri,
+        }),
       );
-    this.save(tokens);
-    this.reconnect = false;
-    this.generation++;
-    this.pending.clear();
+      if (generation !== this.revision)
+        throw new ProviderError(
+          "This connection attempt was canceled. Start again.",
+          409,
+        );
+      this.save(tokens);
+      this.reconnect = false;
+      this.advanceGeneration();
+      this.clearAttempts();
+      this.setAuthorization(
+        "connected",
+        "Schwab authorization completed successfully.",
+        attempt.createdAt,
+        hash,
+      );
+    } catch (error) {
+      if (
+        generation === this.revision &&
+        this.savedAuthorization()?.attemptHash === hash
+      )
+        this.setAuthorization(
+          "failed",
+          "Meida could not complete the authorization exchange. Check the app credentials and callback configuration, then start again.",
+          attempt.createdAt,
+          hash,
+        );
+      throw error;
+    }
+  }
+  deny(
+    state: string,
+    cookieState: string,
+    reason: "denied" | "provider_error" = "denied",
+  ): void {
+    const { hash, attempt } = this.consumeAttempt(state, cookieState);
+    this.setAuthorization(
+      "failed",
+      reason === "denied"
+        ? "Schwab authorization was declined or canceled."
+        : "Schwab returned an authorization error before issuing a code. Check the app status and callback configuration.",
+      attempt.createdAt,
+      hash,
+    );
   }
   disconnect() {
-    this.generation++;
+    this.advanceGeneration();
     this.store.delete("schwabTokens");
-    this.pending.clear();
+    this.clearAttempts();
     this.reconnect = false;
+    this.setAuthorization(
+      "idle",
+      "Schwab is disconnected. Start a new connection when ready.",
+    );
   }
   private save(tokens: TokenSet) {
     this.store.set(
@@ -235,7 +441,7 @@ export class SchwabAuth {
     return {
       accessToken: value.access_token,
       refreshToken,
-      expiresAt: Date.now() + value.expires_in * 1000,
+      expiresAt: this.now() + value.expires_in * 1000,
     };
   }
   private async token(forceRefresh = false): Promise<TokenSet> {
@@ -247,9 +453,9 @@ export class SchwabAuth {
     const tokens = this.readTokens();
     if (!tokens || this.reconnect)
       throw new ProviderError("Connect Schwab before scanning live data.", 401);
-    if (!forceRefresh && tokens.expiresAt > Date.now() + 60_000) return tokens;
+    if (!forceRefresh && tokens.expiresAt > this.now() + 60_000) return tokens;
     if (!this.refreshPromise) {
-      const generation = this.generation;
+      const generation = this.revision;
       this.refreshPromise = this.exchange(
         new URLSearchParams({
           grant_type: "refresh_token",
@@ -258,7 +464,7 @@ export class SchwabAuth {
         tokens.refreshToken,
       )
         .then((next) => {
-          if (generation !== this.generation)
+          if (generation !== this.revision)
             throw new ProviderError(
               "Schwab was disconnected while authorization was refreshing.",
               401,
@@ -268,7 +474,7 @@ export class SchwabAuth {
         })
         .catch((error) => {
           if (
-            generation === this.generation &&
+            generation === this.revision &&
             error instanceof ProviderError &&
             error.status === 401
           )
@@ -287,9 +493,9 @@ export class SchwabAuth {
   ): Promise<unknown> {
     if (!["/quotes", "/chains", "/pricehistory", "/markets"].includes(path))
       throw new ProviderError("Unsupported market-data endpoint.", 400);
-    const generation = this.generation;
+    const generation = this.revision;
     const stillConnected = () => {
-      if (generation !== this.generation)
+      if (generation !== this.revision)
         throw new ProviderError(
           "Schwab connection changed during the request.",
           409,

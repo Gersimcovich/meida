@@ -109,12 +109,19 @@ export interface ScanResult {
   warnings: string[];
   scanned: number;
 }
+export interface AuthorizationStatus {
+  status: "idle" | "awaiting_return" | "exchanging" | "connected" | "failed";
+  updatedAt: number;
+  startedAt?: number;
+  message: string;
+}
 export interface ConnectionStatus {
   configured: boolean;
   connected: boolean;
   reconnectRequired: boolean;
   callbackUrl: string;
   message: string;
+  authorization?: AuthorizationStatus;
 }
 export interface JournalEntry {
   id: string;

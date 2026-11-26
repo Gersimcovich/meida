@@ -52,6 +52,30 @@ import type {
 import TelegramAlerts from "./TelegramAlerts";
 
 type View = "overview" | "watchlist" | "rules" | "journal" | "connections";
+const CONNECTION_FAILURES = {
+  invalid_return:
+    "Schwab returned an incomplete or expired authorization response. Start a new connection attempt from this page.",
+  owner_session:
+    "Your Meida session expired during authorization. Sign in, then start a new Schwab connection.",
+  authorization_failed:
+    "Meida couldn’t complete authorization with Schwab. Check the connection details below and try again.",
+  declined:
+    "Schwab authorization was declined. Start again when you’re ready to grant access.",
+};
+type ConnectionReturn =
+  | { status: "connected" }
+  | { status: "failed"; message: string };
+function readConnectionReturn(): ConnectionReturn | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("connection") === "connected") return { status: "connected" };
+  if (params.get("connection") !== "failed") return null;
+  const reason = params.get("reason");
+  const message =
+    reason && Object.prototype.hasOwnProperty.call(CONNECTION_FAILURES, reason)
+      ? CONNECTION_FAILURES[reason as keyof typeof CONNECTION_FAILURES]
+      : CONNECTION_FAILURES.authorization_failed;
+  return { status: "failed", message };
+}
 const NAV = [
   { id: "overview", label: "Signal overview", icon: Radar },
   { id: "watchlist", label: "Watchlist", icon: Eye },
@@ -124,9 +148,11 @@ async function api<T>(
   path: string,
   method = "GET",
   data?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(path, {
     method,
+    signal,
     headers:
       data === undefined ? undefined : { "Content-Type": "application/json" },
     body: data === undefined ? undefined : JSON.stringify(data),
@@ -370,6 +396,9 @@ export default function App() {
     authenticated: true,
     required: false,
   });
+  const [connectionReturn, setConnectionReturn] =
+    useState(readConnectionReturn);
+  const [connectionRefreshError, setConnectionRefreshError] = useState("");
   const [journalSource, setJournalSource] = useState<SourceMode>("demo");
   const [horizon, setHorizon] = useState("all"),
     [asset, setAsset] = useState("all"),
@@ -383,6 +412,14 @@ export default function App() {
     [closing, setClosing] = useState<JournalEntry | null>(null);
   const scanLock = useRef(false);
   const booted = useRef(false);
+  const workspaceRef = useRef(state);
+  workspaceRef.current = state;
+  const workspaceRevision = useRef(0);
+  const busyRef = useRef(false);
+  const refreshConnectionRef = useRef<(() => void) | null>(null);
+  const authorizationKickoffTimer = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
   const handleError = useCallback((e: unknown) => {
     const failure = e as Error & { status?: number; code?: string };
     setError(failure.message);
@@ -413,6 +450,7 @@ export default function App() {
   const scan = useCallback(
     async (mode: SourceMode) => {
       if (scanLock.current) return;
+      workspaceRevision.current += 1;
       scanLock.current = true;
       setScanning(true);
       setError("");
@@ -461,6 +499,122 @@ export default function App() {
     void loadWorkspace();
   }, [loadWorkspace]);
   useEffect(() => {
+    if (!connectionReturn) return;
+    setView("connections");
+    const url = new URL(window.location.href);
+    url.searchParams.delete("connection");
+    url.searchParams.delete("reason");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      url.pathname + url.search + url.hash,
+    );
+  }, [connectionReturn]);
+  useEffect(() => {
+    if (!connectionReturn || !state || !session.authenticated) return;
+    if (connectionReturn.status === "failed") {
+      setError(connectionReturn.message);
+    } else if (state.connection.connected) {
+      setNotice(
+        "Schwab is connected. Your workspace is ready to use Schwab data.",
+      );
+    } else {
+      setError(
+        "Schwab returned to Meida, but the connection is not active. Check the status below and start again.",
+      );
+    }
+    setConnectionReturn(null);
+  }, [connectionReturn, state, session.authenticated]);
+  const authorizationPhase = state?.connection.authorization?.status;
+  const hasWorkspace = state !== null;
+  useEffect(() => {
+    if (view !== "connections" || !hasWorkspace || !session.authenticated)
+      return;
+    let canceled = false;
+    let requestController: AbortController | null = null;
+    const refreshConnection = async () => {
+      if (canceled || requestController || busyRef.current || scanLock.current)
+        return;
+      const before = workspaceRef.current;
+      if (!before) return;
+      const revision = workspaceRevision.current;
+      const controller = new AbortController();
+      requestController = controller;
+      try {
+        const next = await api<AppState>(
+          "/api/state",
+          "GET",
+          undefined,
+          controller.signal,
+        );
+        if (canceled || revision !== workspaceRevision.current) return;
+        setConnectionRefreshError("");
+        setState((current) => {
+          if (!current || canceled || revision !== workspaceRevision.current)
+            return current;
+          const previousAuthorization = current.connection.authorization;
+          const incomingAuthorization = next.connection.authorization;
+          if (
+            previousAuthorization &&
+            incomingAuthorization &&
+            incomingAuthorization.updatedAt < previousAuthorization.updatedAt
+          )
+            return current;
+          const canSyncSource =
+            current.mode === before.mode &&
+            current.lastScan === before.lastScan &&
+            !busyRef.current &&
+            !scanLock.current;
+          return {
+            ...current,
+            connection: next.connection,
+            ...(canSyncSource
+              ? { mode: next.mode, lastScan: next.lastScan }
+              : {}),
+          };
+        });
+      } catch (caught) {
+        if (canceled || revision !== workspaceRevision.current) return;
+        const failure = caught as Error & { code?: string };
+        if (failure.name === "AbortError") return;
+        if (failure.code === "OWNER_AUTH_REQUIRED") handleError(failure);
+        else
+          setConnectionRefreshError(
+            "Connection status could not be refreshed. Return to this tab to try again.",
+          );
+      } finally {
+        if (requestController === controller) requestController = null;
+      }
+    };
+    const refreshOnFocus = () => {
+      void refreshConnection();
+    };
+    refreshConnectionRef.current = refreshOnFocus;
+    window.addEventListener("focus", refreshOnFocus);
+    void refreshConnection();
+    const timer =
+      authorizationPhase === "awaiting_return" ||
+      authorizationPhase === "exchanging"
+        ? setInterval(refreshOnFocus, 4000)
+        : null;
+    return () => {
+      canceled = true;
+      requestController?.abort();
+      if (timer) clearInterval(timer);
+      if (authorizationKickoffTimer.current)
+        clearTimeout(authorizationKickoffTimer.current);
+      authorizationKickoffTimer.current = null;
+      refreshConnectionRef.current = null;
+      window.removeEventListener("focus", refreshOnFocus);
+    };
+  }, [
+    view,
+    hasWorkspace,
+    session.authenticated,
+    authorizationPhase,
+    handleError,
+  ]);
+  useEffect(() => {
     if (!autoRefresh || !state || busy) return;
     const id = setInterval(() => void scan(state.mode), 60000);
     return () => clearInterval(id);
@@ -489,6 +643,8 @@ export default function App() {
     setMobileNav(false);
   };
   const act = async (work: () => Promise<void>) => {
+    workspaceRevision.current += 1;
+    busyRef.current = true;
     setBusy(true);
     setError("");
     try {
@@ -496,6 +652,7 @@ export default function App() {
     } catch (e) {
       handleError(e);
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -682,10 +839,15 @@ export default function App() {
             <h2>Welcome to your workspace</h2>
             <p>Enter your workspace password to continue.</p>
             <form onSubmit={login}>
-              {error && (
+              {(error || connectionReturn?.status === "failed") && (
                 <div className="feedback error" role="alert">
                   <CircleHelp size={17} />
-                  <span>{error}</span>
+                  <span>
+                    {error ||
+                      (connectionReturn?.status === "failed"
+                        ? connectionReturn.message
+                        : "")}
+                  </span>
                 </div>
               )}
               <label>
@@ -1841,6 +2003,57 @@ export default function App() {
                 <p className="connection-status-text">
                   {state.connection.message}
                 </p>
+                {state.connection.authorization && (
+                  <div
+                    className={`authorization-status ${state.connection.authorization.status}`}
+                    role="status"
+                  >
+                    <div className="authorization-status-heading">
+                      {state.connection.authorization.status ===
+                      "exchanging" ? (
+                        <LoaderCircle size={17} className="spin" />
+                      ) : state.connection.authorization.status ===
+                        "connected" ? (
+                        <CheckCircle2 size={17} />
+                      ) : state.connection.authorization.status === "failed" ? (
+                        <CircleHelp size={17} />
+                      ) : (
+                        <Clock3 size={17} />
+                      )}
+                      <strong>
+                        {
+                          {
+                            idle: "Ready to authorize",
+                            awaiting_return: "Waiting for Schwab’s return",
+                            exchanging: "Completing authorization",
+                            connected: "Authorization completed",
+                            failed: "Connection needs attention",
+                          }[state.connection.authorization.status]
+                        }
+                      </strong>
+                    </div>
+                    {state.connection.authorization.status ===
+                      "awaiting_return" && (
+                      <p>Meida has not received the return from Schwab yet.</p>
+                    )}
+                    <p>{state.connection.authorization.message}</p>
+                    {Number.isFinite(
+                      state.connection.authorization.updatedAt,
+                    ) &&
+                      state.connection.authorization.updatedAt > 0 && (
+                        <span className="authorization-updated">
+                          Updated{" "}
+                          {day(state.connection.authorization.updatedAt)} ·{" "}
+                          {time(state.connection.authorization.updatedAt)} ET
+                        </span>
+                      )}
+                  </div>
+                )}
+                {connectionRefreshError && (
+                  <p className="authorization-refresh-error" role="status">
+                    {connectionRefreshError}
+                  </p>
+                )}
                 <div className="connection-actions">
                   {state.connection.connected ? (
                     <>
@@ -1872,7 +2085,21 @@ export default function App() {
                       </button>
                     </>
                   ) : state.connection.configured ? (
-                    <a className="button primary" href="/api/auth/schwab/start">
+                    <a
+                      className="button primary"
+                      href="/api/auth/schwab/start"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => {
+                        setConnectionRefreshError("");
+                        if (authorizationKickoffTimer.current)
+                          clearTimeout(authorizationKickoffTimer.current);
+                        authorizationKickoffTimer.current = setTimeout(() => {
+                          authorizationKickoffTimer.current = null;
+                          refreshConnectionRef.current?.();
+                        }, 1000);
+                      }}
+                    >
                       <LockKeyhole size={16} />
                       {state.connection.reconnectRequired
                         ? "Reconnect Schwab"
@@ -1885,6 +2112,20 @@ export default function App() {
                     </button>
                   )}
                 </div>
+                {!state.connection.connected && state.connection.configured && (
+                  <div className="authorization-instructions">
+                    <p>
+                      <ExternalLink size={14} />
+                      Opens Schwab in a new tab. Complete sign-in and consent,
+                      then select <strong>Done</strong> on Schwab’s final
+                      screen. Return here to check the connection.
+                    </p>
+                    <p>
+                      Complete Schwab sign-in directly in your regular browser.
+                      Schwab may block AI-managed browsers.
+                    </p>
+                  </div>
+                )}
               </section>
               <TelegramAlerts
                 mode={state.mode}
